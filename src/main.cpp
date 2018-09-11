@@ -8,6 +8,10 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
+#include "spline.h"
+#include "vehicle.h"
+
+#define M_PI 3.141528
 
 using namespace std;
 
@@ -163,6 +167,10 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 }
 
+static int lane = 1;
+static int lane_idx() { return lane * 4 + 2; };
+static double speed = 0.0;
+
 int main() {
   uWS::Hub h;
 
@@ -200,8 +208,9 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
-  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> *ws, char *data, size_t length,
                      uWS::OpCode opCode) {
+  
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
     // The 2 signifies a websocket event
@@ -217,8 +226,9 @@ int main() {
         string event = j[0].get<string>();
         
         if (event == "telemetry") {
-          // j[1] is the data JSON object
-          
+			 // j[1] is the data JSON object
+			
+			
         	// Main car's localization Data
           	double car_x = j[1]["x"];
           	double car_y = j[1]["y"];
@@ -239,24 +249,149 @@ int main() {
 
           	json msgJson;
 
-          	vector<double> next_x_vals;
-          	vector<double> next_y_vals;
+			auto prev_size = previous_path_x.size();
+			vector<double> next_x_vals, next_y_vals;
+			vector<double> pts_x, pts_y;
+			double ref_x = car_x, ref_y = car_y, ref_yaw = deg2rad(car_yaw);
+
+			if (prev_size > 0)
+			{
+				car_s = end_path_s;
+			}
+
+			bool too_close = false;
+
+			for (int i = 0; i < sensor_fusion.size(); i++)
+			{
+				float d = sensor_fusion[i][6];
+				if (d < lane_idx() + 2 && d > lane_idx() - 2)
+				{
+					double vx = sensor_fusion[i][3];
+					double vy = sensor_fusion[i][4];
+					double check_speed = sqrt(vx*vx + vy*vy);
+					double check_car_s = sensor_fusion[i][5];
+
+					check_car_s += static_cast<double>(prev_size) * 0.02 * check_speed;
+
+					if (check_car_s > car_s && (check_car_s - car_s) < 30)
+					{
+						too_close = true;
+
+						if (lane > 0)
+						{
+							lane--;
+						}
+					}
+
+				}
+			}
+
+			if (too_close)
+			{
+				speed -= 0.224;
+			}
+			else if (speed < 49.5)
+			{
+				speed += 0.224;
+			}
+			
+			if (prev_size < 2)
+			{
+				const double prev_car_x = car_x - cos(car_yaw);
+				const double prev_car_y = car_y - sin(car_yaw);
+
+				pts_x.push_back(prev_car_x);
+				pts_x.push_back(car_x);
+				
+				pts_y.push_back(prev_car_y);
+				pts_y.push_back(car_y);
+			}
+			else
+			{
+				ref_x = previous_path_x[prev_size - 1];
+				ref_y = previous_path_y[prev_size - 1];
+				
+				auto prev_ref_x = previous_path_x[prev_size - 2];
+				auto prev_ref_y = previous_path_y[prev_size - 2];
+
+				auto ref_yaw = atan2(ref_y - prev_ref_y, ref_x - prev_ref_x);
+
+				pts_x.push_back(prev_ref_x);
+				pts_x.push_back(ref_x);
+
+				pts_y.push_back(prev_ref_y);
+				pts_y.push_back(ref_y);
+			}
 
 
-          	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
+			auto calc_wp = [&](int offset) { return getXY(car_s + offset, lane_idx(), map_waypoints_s, map_waypoints_x, map_waypoints_y); };
+
+			auto next_wp0 = calc_wp(30);
+			auto next_wp1 = calc_wp(60);
+			auto next_wp2 = calc_wp(90);
+			
+			pts_x.push_back(next_wp0[0]);
+			pts_x.push_back(next_wp1[0]);
+			pts_x.push_back(next_wp2[0]);
+
+			pts_y.push_back(next_wp0[1]);
+			pts_y.push_back(next_wp1[1]);
+			pts_y.push_back(next_wp2[1]);
+
+			for (int i = 0; i < pts_x.size(); i++)
+			{
+				const auto shift_x = pts_x[i] - ref_x;
+				const auto shift_y = pts_y[i] - ref_y;
+
+				pts_x[i] = (shift_x * cos(0 - ref_yaw) - shift_y * sin(0 - ref_yaw));
+				pts_y[i] = (shift_x * sin(0 - ref_yaw) + shift_y * cos(0 - ref_yaw));
+			}
+
+			tk::spline spline;
+			spline.set_points(pts_x, pts_y);
+
+			next_x_vals.insert(next_x_vals.end(), previous_path_x.begin(), previous_path_x.end());
+			next_y_vals.insert(next_y_vals.end(), previous_path_y.begin(), previous_path_y.end());
+
+			double target_x = 30.0, target_y = spline(target_x);
+			double target_dist = sqrt(target_x * target_x + target_y * target_y);
+
+			double x_add_on = 0;
+
+			for (int i = 1; i <= 50 - prev_size; i++)
+			{
+				double N = target_dist / (0.02 * speed / 2.24);
+				double x_point = x_add_on + target_x / N;
+				double y_point = spline(x_point);
+
+				x_add_on = x_point;
+
+				double x_ref = x_point, y_ref = y_point;
+
+				x_point = x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw);
+				y_point = x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw);
+
+				x_point += ref_x;
+				y_point += ref_y;
+
+				next_x_vals.push_back(x_point);
+				next_y_vals.push_back(y_point);
+
+			}
+
           	msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
 
           	auto msg = "42[\"control\","+ msgJson.dump()+"]";
 
           	//this_thread::sleep_for(chrono::milliseconds(1000));
-          	ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+          	ws->send(msg.data(), msg.length(), uWS::OpCode::TEXT);
           
         }
       } else {
         // Manual driving
         std::string msg = "42[\"manual\",{}]";
-        ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+        ws->send(msg.data(), msg.length(), uWS::OpCode::TEXT);
       }
     }
   });
@@ -264,29 +399,25 @@ int main() {
   // We don't need this since we're not using HTTP but if it's removed the
   // program
   // doesn't compile :-(
-  h.onHttpRequest([](uWS::HttpResponse *res, uWS::HttpRequest req, char *data,
-                     size_t, size_t) {
-    const std::string s = "<h1>Hello world!</h1>";
-    if (req.getUrl().valueLength == 1) {
-      res->end(s.data(), s.length());
-    } else {
-      // i guess this should be done more gracefully?
-      res->end(nullptr, 0);
-    }
+  std::string response = "Hello!";
+
+  h.onHttpRequest([&](uWS::HttpResponse *res, uWS::HttpRequest req, char *data, size_t length,
+	  size_t remainingBytes) {
+	  res->end(response.data(), response.length());
   });
 
-  h.onConnection([&h](uWS::WebSocket<uWS::SERVER> ws, uWS::HttpRequest req) {
+  h.onConnection([&h](uWS::WebSocket<uWS::SERVER> *ws, uWS::HttpRequest req) {
     std::cout << "Connected!!!" << std::endl;
   });
 
-  h.onDisconnection([&h](uWS::WebSocket<uWS::SERVER> ws, int code,
+  h.onDisconnection([&h](uWS::WebSocket<uWS::SERVER> *ws, int code,
                          char *message, size_t length) {
-    ws.close();
+    ws->close();
     std::cout << "Disconnected" << std::endl;
   });
 
   int port = 4567;
-  if (h.listen(port)) {
+  if (h.listen("127.0.0.1", port)) {
     std::cout << "Listening to port " << port << std::endl;
   } else {
     std::cerr << "Failed to listen to port" << std::endl;

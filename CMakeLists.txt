@@ -1,4 +1,4 @@
-project(Path_Planning)
+project(path_planning)
 
 cmake_minimum_required (VERSION 3.5)
 
@@ -8,7 +8,6 @@ set(CXX_FLAGS "-Wall")
 set(CMAKE_CXX_FLAGS, "${CXX_FLAGS}")
 
 set(sources src/main.cpp)
-
 
 if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin") 
 
@@ -20,7 +19,12 @@ link_directories(/usr/local/Cellar/libuv/1.11.0/lib)
 
 endif(${CMAKE_SYSTEM_NAME} MATCHES "Darwin") 
 
+if(${CMAKE_SYSTEM_NAME} MATCHES "Windows") 
+include_directories("C:/Users/kamil/dev/vcpkg/installed/x86-windows/include")
+link_directories("C:/Users/kamil/dev/vcpkg/installed/x86-windows/debug/lib")
+endif(${CMAKE_SYSTEM_NAME} MATCHES "Windows") 
+
 
 add_executable(path_planning ${sources})
 
-target_link_libraries(path_planning z ssl uv uWS)
+target_link_libraries(path_planning zlib ssleay32 libuv libeay32 uWS)
